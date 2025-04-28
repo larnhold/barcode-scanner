@@ -1,5 +1,5 @@
 {
-  "name": "@capacitor-community/barcode-scanner",
+  "name": "@larnhold/barcode-scanner",
   "version": "7.0.0",
   "description": "A fast and efficient (QR) barcode scanner for Capacitor",
   "main": "dist/plugin.cjs.js",
@@ -17,10 +17,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/capacitor-community/barcode-scanner.git"
+    "url": "https://github.com/larnhold/barcode-scanner.git"
   },
   "bugs": {
-    "url": "https://github.com/capacitor-community/barcode-scanner/issues"
+    "url": "https://github.com/larnhold/barcode-scanner/issues"
   },
   "keywords": [
     "capacitor",
