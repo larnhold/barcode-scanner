@@ -45,22 +45,23 @@ import org.json.JSONException;
 public class BarcodeScanner extends Plugin implements BarcodeCallback {
 
     public static final String PERMISSION_ALIAS_CAMERA = "camera";
-
+    private static final String TAG = "BarcodeScanner";
+    private static final String PREFS_PERMISSION_FIRST_TIME_ASKING = "PREFS_PERMISSION_FIRST_TIME_ASKING";
+    private static final String PERMISSION_NAME = Manifest.permission.CAMERA;
+    private static final String GRANTED = "granted";
+    private static final String DENIED = "denied";
+    private static final String ASKED = "asked";
+    private static final String NEVER_ASKED = "neverAsked";
+    private static final Map<String, BarcodeFormat> SUPPORTED_FORMATS = supportedFormats();
     private BarcodeView mBarcodeView;
-
-    // private int currentCameraId = Camera.CameraInfo.CAMERA_FACING_BACK;
-
     private boolean isScanning = false;
     private boolean shouldRunScan = false;
-    private boolean didRunCameraSetup = false;
     private boolean didRunCameraPrepare = false;
     private boolean isBackgroundHidden = false;
     private boolean isTorchOn = false;
     private boolean scanningPaused = false;
     private String lastScanResult = null;
-
-    // declare a map constant for allowed barcode formats
-    private static final Map<String, BarcodeFormat> supportedFormats = supportedFormats();
+    private JSObject pendingPermissionResult;
 
     private static Map<String, BarcodeFormat> supportedFormats() {
         Map<String, BarcodeFormat> map = new HashMap<>();
@@ -88,65 +89,57 @@ public class BarcodeScanner extends Plugin implements BarcodeCallback {
     }
 
     private boolean hasCamera() {
-        // @TODO(): check: https://stackoverflow.com/a/57974578/8634342
-        if (getActivity().getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
-            return true;
-        } else {
-            return false;
-        }
+        return getActivity().getPackageManager().hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY);
     }
 
     private void setupCamera(String cameraDirection) {
-        // @TODO(): add support for switching cameras while scanning is running
-
         getActivity()
-            .runOnUiThread(
-                () -> {
-                    // Create BarcodeView
-                    mBarcodeView = new BarcodeView(getActivity());
+                .runOnUiThread(
+                        () -> {
+                            if (mBarcodeView != null) {
+                                return; // Already setup
+                            }
+                            // Create BarcodeView
+                            mBarcodeView = new BarcodeView(getActivity());
 
-                    // Configure the camera (front/back)
-                    CameraSettings settings = new CameraSettings();
-                    settings.setRequestedCameraId(
-                        "front".equals(cameraDirection) ? Camera.CameraInfo.CAMERA_FACING_FRONT : Camera.CameraInfo.CAMERA_FACING_BACK
-                    );
-                    settings.setContinuousFocusEnabled(true);
-                    mBarcodeView.setCameraSettings(settings);
+                            // Configure the camera (front/back)
+                            CameraSettings settings = new CameraSettings();
+                            settings.setRequestedCameraId(
+                                    "front".equals(cameraDirection) ? Camera.CameraInfo.CAMERA_FACING_FRONT : Camera.CameraInfo.CAMERA_FACING_BACK
+                            );
+                            settings.setContinuousFocusEnabled(true);
+                            mBarcodeView.setCameraSettings(settings);
 
-                    FrameLayout.LayoutParams cameraPreviewParams = new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT
-                    );
+                            FrameLayout.LayoutParams cameraPreviewParams = new FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                    FrameLayout.LayoutParams.MATCH_PARENT
+                            );
 
-                    // Set BarcodeView as sibling View of WebView
-                    ((ViewGroup) bridge.getWebView().getParent()).addView(mBarcodeView, cameraPreviewParams);
+                            // Set BarcodeView as sibling View of WebView
+                            ((ViewGroup) bridge.getWebView().getParent()).addView(mBarcodeView, cameraPreviewParams);
 
-                    // Bring the WebView in front of the BarcodeView
-                    // This allows us to completely style the BarcodeView in HTML/CSS
-                    bridge.getWebView().bringToFront();
+                            // Bring the WebView in front of the BarcodeView
+                            // This allows us to completely style the BarcodeView in HTML/CSS
+                            bridge.getWebView().bringToFront();
 
-                    mBarcodeView.resume();
-                }
-            );
-
+                            mBarcodeView.resume();
+                        }
+                );
         didRunCameraSetup = true;
     }
 
     private void dismantleCamera() {
-        // opposite of setupCamera
-
         getActivity()
-            .runOnUiThread(
-                () -> {
-                    if (mBarcodeView != null) {
-                        mBarcodeView.pause();
-                        mBarcodeView.stopDecoding();
-                        ((ViewGroup) bridge.getWebView().getParent()).removeView(mBarcodeView);
-                        mBarcodeView = null;
-                    }
-                }
-            );
-
+                .runOnUiThread(
+                        () -> {
+                            if (mBarcodeView != null) {
+                                mBarcodeView.pause();
+                                mBarcodeView.stopDecoding();
+                                ((ViewGroup) bridge.getWebView().getParent()).removeView(mBarcodeView);
+                                mBarcodeView = null;
+                            }
+                        }
+                );
         isScanning = false;
         didRunCameraSetup = false;
         didRunCameraPrepare = false;
@@ -176,110 +169,117 @@ public class BarcodeScanner extends Plugin implements BarcodeCallback {
     private void destroy() {
         showBackground();
         dismantleCamera();
-        this.setTorch(false);
+        setTorch(false);
     }
 
     private void configureCamera() {
         getActivity()
-            .runOnUiThread(
-                () -> {
-                    PluginCall call = getSavedCall();
+                .runOnUiThread(
+                        () -> {
+                            PluginCall call = getSavedCall();
 
-                    if (call == null || mBarcodeView == null) {
-                        Log.d("scanner", "Something went wrong with configuring the BarcodeScanner.");
-                        return;
-                    }
+                            if (call == null || mBarcodeView == null) {
+                                Log.d(TAG, "Something went wrong with configuring the BarcodeScanner.");
+                                return;
+                            }
 
-                    DefaultDecoderFactory defaultDecoderFactory = new DefaultDecoderFactory(null, null, null, Intents.Scan.MIXED_SCAN);
+                            DefaultDecoderFactory defaultDecoderFactory = new DefaultDecoderFactory(null, null, null, Intents.Scan.MIXED_SCAN);
 
-                    if (call.hasOption("targetedFormats")) {
-                        JSArray targetedFormats = call.getArray("targetedFormats");
-                        ArrayList<BarcodeFormat> formatList = new ArrayList<>();
+                            if (call.hasOption("targetedFormats")) {
+                                JSArray targetedFormats = call.getArray("targetedFormats");
+                                ArrayList<BarcodeFormat> formatList = new ArrayList<>();
 
-                        if (targetedFormats != null && targetedFormats.length() > 0) {
-                            for (int i = 0; i < targetedFormats.length(); i++) {
-                                try {
-                                    String targetedFormat = targetedFormats.getString(i);
-                                    BarcodeFormat targetedBarcodeFormat = supportedFormats.get(targetedFormat);
-                                    if (targetedBarcodeFormat != null) {
-                                        formatList.add(targetedBarcodeFormat);
+                                if (targetedFormats != null && targetedFormats.length() > 0) {
+                                    for (int i = 0; i < targetedFormats.length(); i++) {
+                                        try {
+                                            String targetedFormat = targetedFormats.getString(i);
+                                            BarcodeFormat targetedBarcodeFormat = SUPPORTED_FORMATS.get(targetedFormat);
+                                            if (targetedBarcodeFormat != null) {
+                                                formatList.add(targetedBarcodeFormat);
+                                            } else {
+                                                Log.w(TAG, "Unsupported format: " + targetedFormat);
+                                            }
+                                        } catch (JSONException e) {
+                                            Log.e(TAG, "Error processing targetedFormats: " + e.getMessage());
+                                        }
                                     }
-                                } catch (JSONException e) {
-                                    e.printStackTrace();
+                                }
+
+                                if (!formatList.isEmpty()) {
+                                    defaultDecoderFactory = new DefaultDecoderFactory(formatList, null, null, Intents.Scan.MIXED_SCAN);
+                                } else {
+                                    Log.d(TAG, "No valid targetedFormats specified, scanning all supported formats.");
                                 }
                             }
-                        }
 
-                        if (formatList.size() > 0) {
-                            defaultDecoderFactory = new DefaultDecoderFactory(formatList, null, null, Intents.Scan.MIXED_SCAN);
-                        } else {
-                            Log.d("scanner", "The property targetedFormats was not set correctly.");
+                            mBarcodeView.setDecoderFactory(defaultDecoderFactory);
                         }
-                    }
-
-                    mBarcodeView.setDecoderFactory(defaultDecoderFactory);
-                }
-            );
+                );
     }
 
     private void scan() {
         if (!didRunCameraPrepare) {
             if (hasCamera()) {
-                if (!hasPermission(Manifest.permission.CAMERA)) {
-                    Log.d("scanner", "No permission to use camera. Did you request it yet?");
+                if (getPermissionState(PERMISSION_ALIAS_CAMERA) != PermissionState.GRANTED) {
+                    Log.d(TAG, "Camera permission not granted. Requesting permission.");
+                    shouldRunScan = true;
+                    requestCameraPermission(getSavedCall());
                 } else {
                     shouldRunScan = true;
                     _prepare(getSavedCall());
                 }
+            } else {
+                PluginCall call = getSavedCall();
+                if (call != null) {
+                    call.reject("Device does not have a camera.");
+                    freeSavedCall();
+                }
             }
         } else {
             didRunCameraPrepare = false;
-
             shouldRunScan = false;
-
             configureCamera();
 
             final BarcodeCallback b = this;
             getActivity()
-                .runOnUiThread(
-                    () -> {
-                        if (mBarcodeView != null) {
-                            PluginCall call = getSavedCall();
-                            if (call != null && call.isKeptAlive()) {
-                                mBarcodeView.decodeContinuous(b);
-                            } else {
-                                mBarcodeView.decodeSingle(b);
+                    .runOnUiThread(
+                            () -> {
+                                if (mBarcodeView != null) {
+                                    PluginCall call = getSavedCall();
+                                    if (call != null && call.isKeptAlive()) {
+                                        mBarcodeView.decodeContinuous(b);
+                                    } else {
+                                        mBarcodeView.decodeSingle(b);
+                                    }
+                                }
                             }
-                        }
-                    }
-                );
+                    );
 
             hideBackground();
-
             isScanning = true;
         }
     }
 
     private void hideBackground() {
         getActivity()
-            .runOnUiThread(
-                () -> {
-                    bridge.getWebView().setBackgroundColor(Color.TRANSPARENT);
-                    bridge.getWebView().loadUrl("javascript:document.documentElement.style.backgroundColor = 'transparent';void(0);");
-                    isBackgroundHidden = true;
-                }
-            );
+                .runOnUiThread(
+                        () -> {
+                            bridge.getWebView().setBackgroundColor(Color.TRANSPARENT);
+                            bridge.getWebView().loadUrl("javascript:document.documentElement.style.backgroundColor = 'transparent';void(0);");
+                            isBackgroundHidden = true;
+                        }
+                );
     }
 
     private void showBackground() {
         getActivity()
-            .runOnUiThread(
-                () -> {
-                    bridge.getWebView().setBackgroundColor(Color.WHITE);
-                    bridge.getWebView().loadUrl("javascript:document.documentElement.style.backgroundColor = '';void(0);");
-                    isBackgroundHidden = false;
-                }
-            );
+                .runOnUiThread(
+                        () -> {
+                            bridge.getWebView().setBackgroundColor(Color.WHITE);
+                            bridge.getWebView().loadUrl("javascript:document.documentElement.style.backgroundColor = '';void(0);");
+                            isBackgroundHidden = false;
+                        }
+                );
     }
 
     @Override
@@ -359,11 +359,10 @@ public class BarcodeScanner extends Plugin implements BarcodeCallback {
             if (resolveScan != null && resolveScan) {
                 JSObject jsObject = new JSObject();
                 jsObject.put("hasContent", false);
-
                 getSavedCall().resolve(jsObject);
             }
+            freeSavedCall();
         }
-
         destroy();
         call.resolve();
     }
@@ -390,135 +389,44 @@ public class BarcodeScanner extends Plugin implements BarcodeCallback {
         call.resolve();
     }
 
-    private static final String TAG_PERMISSION = "permission";
-
-    private static final String GRANTED = "granted";
-    private static final String DENIED = "denied";
-    private static final String ASKED = "asked";
-    private static final String NEVER_ASKED = "neverAsked";
-
-    private static final String PERMISSION_NAME = Manifest.permission.CAMERA;
-
-    private JSObject savedReturnObject;
-
-    void _checkPermission(PluginCall call, boolean force) {
-        this.savedReturnObject = new JSObject();
-
-        if (getPermissionState(PERMISSION_ALIAS_CAMERA) == PermissionState.GRANTED) {
-            // permission GRANTED
-            this.savedReturnObject.put(GRANTED, true);
+    private void requestCameraPermission(PluginCall call) {
+        if (getPermissionState(PERMISSION_ALIAS_CAMERA) != PermissionState.GRANTED) {
+            saveCall(call);
+            requestPermissionForAlias(PERMISSION_ALIAS_CAMERA, call, "cameraPermissionResult");
         } else {
-            // permission NOT YET GRANTED
-
-            // check if asked before
-            boolean neverAsked = isPermissionFirstTimeAsking(PERMISSION_NAME);
-            if (neverAsked) {
-                this.savedReturnObject.put(NEVER_ASKED, true);
-            }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                // from version Android M on,
-                // on runtime,
-                // each permission can be temporarily denied,
-                // or be denied forever
-                if (neverAsked || getActivity().shouldShowRequestPermissionRationale(PERMISSION_NAME)) {
-                    // permission never asked before
-                    // OR
-                    // permission DENIED, BUT not for always
-                    // So
-                    // can be asked (again)
-                    if (force) {
-                        // request permission
-                        // so a callback can be made from the handleRequestPermissionsResult
-                        requestPermissionForAlias(PERMISSION_ALIAS_CAMERA, call, "cameraPermsCallback");
-                        return;
-                    }
-                } else {
-                    // permission DENIED
-                    // user ALSO checked "NEVER ASK AGAIN"
-                    this.savedReturnObject.put(DENIED, true);
-                }
-            } else {
-                // below android M
-                // no runtime permissions exist
-                // so always
-                // permission GRANTED
-                this.savedReturnObject.put(GRANTED, true);
-            }
+            call.resolve();
         }
-        call.resolve(this.savedReturnObject);
-    }
-
-    private static final String PREFS_PERMISSION_FIRST_TIME_ASKING = "PREFS_PERMISSION_FIRST_TIME_ASKING";
-
-    private void setPermissionFirstTimeAsking(String permission, boolean isFirstTime) {
-        SharedPreferences sharedPreference = getActivity().getSharedPreferences(PREFS_PERMISSION_FIRST_TIME_ASKING, MODE_PRIVATE);
-        sharedPreference.edit().putBoolean(permission, isFirstTime).apply();
-    }
-
-    private boolean isPermissionFirstTimeAsking(String permission) {
-        return getActivity().getSharedPreferences(PREFS_PERMISSION_FIRST_TIME_ASKING, MODE_PRIVATE).getBoolean(permission, true);
     }
 
     @PermissionCallback
-    private void cameraPermsCallback(PluginCall call) {
-        if (this.savedReturnObject == null) {
-            // No stored plugin call for permissions request result
-            return;
-        }
-
-        // the user was apparently requested this permission
-        // update the preferences to reflect this
-        setPermissionFirstTimeAsking(PERMISSION_NAME, false);
-
-        boolean granted = false;
+    private void cameraPermissionResult(PluginCall call) {
         if (getPermissionState(PERMISSION_ALIAS_CAMERA) == PermissionState.GRANTED) {
-            granted = true;
-        }
-
-        // indicate that the user has been asked to accept this permission
-        this.savedReturnObject.put(ASKED, true);
-
-        if (granted) {
-            // permission GRANTED
-            Log.d(TAG_PERMISSION, "Asked. Granted");
-            this.savedReturnObject.put(GRANTED, true);
-        } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (getActivity().shouldShowRequestPermissionRationale(PERMISSION_NAME)) {
-                    // permission DENIED
-                    // BUT not for always
-                    Log.d(TAG_PERMISSION, "Asked. Denied For Now");
-                } else {
-                    // permission DENIED
-                    // user ALSO checked "NEVER ASK AGAIN"
-                    Log.d(TAG_PERMISSION, "Asked. Denied");
-                    this.savedReturnObject.put(DENIED, true);
-                }
-            } else {
-                // below android M
-                // no runtime permissions exist
-                // so always
-                // permission GRANTED
-                Log.d(TAG_PERMISSION, "Asked. Granted");
-                this.savedReturnObject.put(GRANTED, true);
+            // Permission granted, proceed with scanning
+            if (shouldRunScan) {
+                _prepare(call);
             }
+            call.resolve();
+        } else {
+            // Permission denied
+            call.reject("User denied camera permission.");
+            freeSavedCall();
+            shouldRunScan = false;
+            destroy();
         }
-        // resolve saved call
-        call.resolve(this.savedReturnObject);
-        // release saved vars
-        this.savedReturnObject = null;
     }
 
     @PluginMethod
     public void checkPermission(PluginCall call) {
-        Boolean force = call.getBoolean("force", false);
+        JSObject result = new JSObject();
+        PermissionState state = getPermissionState(PERMISSION_ALIAS_CAMERA);
+        result.put("granted", state == PermissionState.GRANTED);
+        result.put("state", state.toString());
+        call.resolve(result);
+    }
 
-        if (force != null && force) {
-            _checkPermission(call, true);
-        } else {
-            _checkPermission(call, false);
-        }
+    @PluginMethod
+    public void requestPermissions(PluginCall call) {
+        requestCameraPermission(call);
     }
 
     @PluginMethod
@@ -537,40 +445,47 @@ public class BarcodeScanner extends Plugin implements BarcodeCallback {
         if (on != isTorchOn) {
             isTorchOn = on;
             getActivity()
-                .runOnUiThread(
-                    () -> {
-                        if (mBarcodeView != null) {
-                            mBarcodeView.setTorch(on);
-                        }
-                    }
-                );
+                    .runOnUiThread(
+                            () -> {
+                                if (mBarcodeView != null) {
+                                    mBarcodeView.setTorch(on);
+                                }
+                            }
+                    );
         }
     }
 
     @PluginMethod
     public void enableTorch(PluginCall call) {
-        this.setTorch(true);
+        setTorch(true);
         call.resolve();
     }
 
     @PluginMethod
     public void disableTorch(PluginCall call) {
-        this.setTorch(false);
+        setTorch(false);
         call.resolve();
     }
 
     @PluginMethod
     public void toggleTorch(PluginCall call) {
-        this.setTorch(!this.isTorchOn);
+        setTorch(!isTorchOn);
         call.resolve();
     }
 
     @PluginMethod
     public void getTorchState(PluginCall call) {
         JSObject result = new JSObject();
-
-        result.put("isEnabled", this.isTorchOn);
-
+        result.put("isEnabled", isTorchOn);
         call.resolve(result);
+    }
+
+    private void setPermissionFirstTimeAsking(String permission, boolean isFirstTime) {
+        SharedPreferences sharedPreference = getActivity().getSharedPreferences(PREFS_PERMISSION_FIRST_TIME_ASKING, MODE_PRIVATE);
+        sharedPreference.edit().putBoolean(permission, isFirstTime).apply();
+    }
+
+    private boolean isPermissionFirstTimeAsking(String permission) {
+        return getActivity().getSharedPreferences(PREFS_PERMISSION_FIRST_TIME_ASKING, MODE_PRIVATE).getBoolean(permission, true);
     }
 }
